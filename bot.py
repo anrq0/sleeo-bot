@@ -53,8 +53,9 @@ def http() -> aiohttp.ClientSession:
 
 # ── Supabase ──────────────────────────────────────────────────────────────────
 async def sb(method: str, path: str, prefer: str = "return=representation", **kw):
-    headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}",
-               "Content-Type": "application/json", "Prefer": prefer}
+    headers = {"apikey": SUPABASE_KEY, "Content-Type": "application/json", "Prefer": prefer}
+    if not SUPABASE_KEY.startswith("sb_"):  # anciennes clés (JWT) : en-tête Authorization nécessaire
+        headers["Authorization"] = f"Bearer {SUPABASE_KEY}"
     try:
         async with http().request(method, f"{SUPABASE_URL}/rest/v1/{path}", headers=headers,
                                   timeout=aiohttp.ClientTimeout(total=15), **kw) as r:
