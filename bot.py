@@ -123,8 +123,8 @@ async def vget(url: str, base: str):
             if r.status in (401, 403):
                 _cookies.pop(base, None)  # le cookie est périmé : on le renouvelle au prochain tour
             if r.status != 200:
-             print(f"[vinted] statut {r.status} pour {url[:80]}")
-             return None
+                print(f"[vinted] statut {r.status} pour {url[:80]}")
+                return None
             return await r.json(content_type=None)
     except Exception as e:
         print(f"[vinted] {e}")
@@ -320,26 +320,35 @@ async def filtreperso(ctx):
     await ctx.channel.send(embed=e, view=CreatePersonalView())
 
 # ── Boucle de veille ──────────────────────────────────────────────────────────
+TEST_SEND = os.environ.get("TEST_SEND") == "1"
+
 @tasks.loop(seconds=CHECK_INTERVAL)
 async def check_vinted():
+    nb = sum(len(d["filters"]) for d in monitors.values())
+    print(f"[tick] salons={len(monitors)} filtres={nb}")
     for cid, d in list(monitors.items()):
         channel = bot.get_channel(cid)
         if not channel:
+            print(f"[tick] salon {cid} introuvable (le bot n'y a pas accès ?)")
             continue
         for f in list(d["filters"]):
             data = await vget(f["api_url"], base_of(f["url"]))
             items = (data or {}).get("items", [])
+            print(f"[tick] {f['url'][:60]} -> {len(items)} annonces (réponse reçue : {data is not None})")
             if not items:
                 continue
             if not f["seen"]:  # première lecture : on mémorise sans envoyer
                 f["seen"].update(x["id"] for x in items)
+                if TEST_SEND:  # mode test : envoie la plus récente pour vérifier
+                    det = (await vget(f"{base_of(f['url'])}/api/v2/items/{items[0]['id']}", base_of(f["url"]))) or {}
+                    await send_item(channel, items[0], det.get("item", {}), f["flag"])
                 continue
             for item in reversed([x for x in items if x["id"] not in f["seen"]]):
                 f["seen"].add(item["id"])
                 det = (await vget(f"{base_of(f['url'])}/api/v2/items/{item['id']}", base_of(f["url"]))) or {}
                 await send_item(channel, item, det.get("item", {}), f["flag"])
                 await asyncio.sleep(1)
-            if len(f["seen"]) > 500:  # évite que la mémoire grossisse sans fin
+            if len(f["seen"]) > 500:
                 f["seen"] = set(list(f["seen"])[-200:])
 
 @check_vinted.before_loop
