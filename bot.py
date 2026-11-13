@@ -10,6 +10,7 @@ import os, re, time, asyncio
 from urllib.parse import urlparse, parse_qs, urlencode
 import aiohttp
 import discord
+from yarl import URL
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
 
@@ -107,7 +108,7 @@ async def get_cookie(base: str) -> str:
         async with aiohttp.ClientSession() as s:
             async with s.get(base + "/", headers={"User-Agent": UA, "Accept": "text/html"},
                              timeout=aiohttp.ClientTimeout(total=15)) as r:
-                jar = s.cookie_jar.filter_cookies(base + "/")
+                jar = s.cookie_jar.filter_cookies(URL(base + "/"))
                 cookie = "; ".join(f"{k}={v.value}" for k, v in jar.items())
                 _cookies[base] = (cookie, time.time())
                 return cookie
