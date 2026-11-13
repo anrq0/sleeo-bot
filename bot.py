@@ -123,6 +123,7 @@ async def vget(url: str, base: str):
             if r.status in (401, 403):
                 _cookies.pop(base, None)  # le cookie est périmé : on le renouvelle au prochain tour
             if r.status != 200:
+             print(f"[vinted] statut {r.status} pour {url[:80]}")
                 return None
             return await r.json(content_type=None)
     except Exception as e:
