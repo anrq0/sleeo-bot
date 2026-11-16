@@ -147,6 +147,23 @@ async def fetch_detail(url):
         print(f"[detail] {e}")
     return d
 
+# ───────────── Diagnostic intégré (remplace le Shell de Render, payant) ─────────────
+DIAG_URL = "https://www.vinted.fr/catalog?search_text=carhartt&order=newest_first"
+async def diag():
+    proxy = PROXIES[0] if PROXIES else None
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(DIAG_URL, proxy=proxy, timeout=aiohttp.ClientTimeout(total=25), headers={
+                    "User-Agent": UA, "Accept": "text/html", "Accept-Language": "fr-FR,fr;q=0.9"}) as r:
+                html = await r.text()
+                n = len(parse_cards(html))
+                verdict = ("✅ Ça marche." if r.status == 200 and n else
+                           "⛔ Bloqué : il faut un proxy résidentiel." if r.status in (403, 429, 503) else
+                           "⚠️ Vinted répond mais aucune annonce lue : l'affichage a changé ou une vérification est demandée.")
+                return f"HTTP {r.status} · {len(html) // 1024} Ko · {n} annonces lues · proxy : {'oui' if proxy else 'non'}\n{verdict}"
+    except Exception as e:
+        return f"Échec de connexion à Vinted : {e}"
+
 # ───────────── Publication Discord ─────────────
 def stars(r, n):
     if not n or not r:
@@ -360,6 +377,12 @@ async def setup(ctx):
         "1️⃣ Sur vinted.fr, applique tes filtres\n2️⃣ Copie le lien de la barre d'adresse\n3️⃣ Clique **➕ Ajouter un filtre**\n\n"
         f"Compte Sleeo requis : {SITE_URL}")), view=PanelView())
 
+@bot.command(name="diag")
+@commands.has_permissions(administrator=True)
+async def diag_cmd(ctx):
+    await ctx.send("🔎 Test de lecture de Vinted en cours…")
+    await ctx.send("📡 " + await diag())
+
 @bot.command(name="status")
 @commands.has_permissions(administrator=True)
 async def status(ctx):
@@ -369,6 +392,7 @@ async def status(ctx):
 @bot.event
 async def on_ready():
     print(f"✅ Connecté : {bot.user}")
+    print("[diag]", await diag())
     bot.add_view(PanelView())
     if not hasattr(scheduler, "sources"):
         scheduler.sources, scheduler.sem = {}, asyncio.Semaphore(CONCURRENCY)
