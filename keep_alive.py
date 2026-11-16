@@ -1,16 +1,17 @@
-import os, logging
-from threading import Thread
-from flask import Flask
+"""Petit serveur web pour Render (service « Web Service »). Il répond sur le port demandé par Render,
+ce qui supprime l'avertissement « No open ports detected » et permet à UptimeRobot de garder le bot éveillé."""
+import os, threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
-app = Flask(__name__)
-logging.getLogger("werkzeug").setLevel(logging.ERROR)
-
-@app.route("/")
-def home():
-    return "Le bot est en ligne !"
-
-def run():
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
+class Handler(BaseHTTPRequestHandler):
+    def _ok(self, body=True):
+        self.send_response(200); self.send_header("Content-Type", "text/plain; charset=utf-8"); self.end_headers()
+        if body:
+            self.wfile.write(b"Sleeo Watch OK")
+    def do_GET(self): self._ok()
+    def do_HEAD(self): self._ok(False)
+    def log_message(self, *args): pass
 
 def keep_alive():
-    Thread(target=run, daemon=True).start()
+    port = int(os.environ.get("PORT", "10000"))
+    threading.Thread(target=lambda: HTTPServer(("0.0.0.0", port), Handler).serve_forever(), daemon=True).start()
