@@ -120,29 +120,102 @@ def parse_cards(html):
                     "fav": int(num(fav.get_text()) or 0) if fav else 0, "demand": bool(badge and "demande" in badge.get_text().lower())})
     return out
 
+PHOTO_RX = re.compile(r'"image_no":\s*(\d+)[^{}]*?"url":\s*"(https://images\d*\.vinted\.net/[^"]+)"')
+IMG_ANY = re.compile(r'https://images\d*\.vinted\.net/t/([0-9A-Za-z_]+)/(f800|\d+x\d+)/[0-9A-Za-z]+\.(?:jpeg|jpg|webp|png)(?:\?s=[0-9a-f]+)?')
+SELLERS = {}
+
+def unescape(h):
+    return h.replace('\\"', '"').replace("\\/", "/").replace("\\u0026", "&")
+
+def photo_id(u):
+    m = re.search(r"/t/([^/]+)/", u or "")
+    return m.group(1) if m else (u or "")
+
+def dedupe_photos(urls, limit=3):
+    out, seen = [], set()
+    for u in urls:
+        p = photo_id(u)
+        if u and p not in seen:
+            seen.add(p)
+            out.append(u)
+    return out[:limit]
+
+def extract_photos(html):
+    """Les photos DE L'ANNONCE, dans l'ordre (image_no 1, 2, 3...), sans la photo de profil du vendeur."""
+    t = unescape(html)
+    found = {}
+    for n, u in PHOTO_RX.findall(t):
+        found.setdefault(int(n), u)
+    urls = [found[k] for k in sorted(found)]
+    if not urls:                                         # plan B : toutes les images, en retirant les avatars (miniatures carrées)
+        avatars, best, order = set(), {}, []
+        for m in IMG_ANY.finditer(t):
+            pid, size = m.group(1), m.group(2)
+            w = re.match(r"(\d+)x(\d+)$", size)
+            if w and w.group(1) == w.group(2):
+                avatars.add(pid)
+            if pid not in best:
+                order.append(pid)
+            if pid not in best or (size == "f800" and "/f800/" not in best[pid]):
+                best[pid] = m.group(0)
+        urls = [best[p] for p in order if p not in avatars]
+    return dedupe_photos(urls, 6)
+
+def merge_imgs(card_img, photos):
+    """3 photos différentes : celles de la page annonce (haute définition) ; l'image de la carte seulement si la page n'en donne aucune."""
+    return dedupe_photos(list(photos) if photos else ([card_img] if card_img else []), 3)
+
+async def seller_stats(sid):
+    c = SELLERS.get(sid)
+    if c and time.time() - c[0] < 3600:
+        return c[1], c[2]
+    rating = reviews = None
+    html = await fetcher.get(f"https://www.vinted.fr/member/{sid}", tries=1)
+    if html:
+        t = unescape(html)
+        r = re.search(r'"feedback_reputation":\s*([0-9.]+)', t)
+        n = re.search(r'"feedback_count":\s*(\d+)', t) or re.search(r"(\d+)\s+évaluation", t)
+        rating = float(r.group(1)) if r else None
+        reviews = int(n.group(1)) if n else None
+    SELLERS[sid] = (time.time(), rating, reviews)
+    if len(SELLERS) > 3000:
+        SELLERS.clear()
+    return rating, reviews
+
 async def fetch_detail(url):
-    """3 photos, vendeur et avis, depuis la page de l'annonce (JSON-LD + données de la page). Tout est facultatif."""
+    """Photos, vendeur et avis depuis la page de l'annonce. Tout est facultatif."""
     d = {"images": [], "seller": None, "seller_id": None, "rating": None, "reviews": None, "created": None}
     html = await fetcher.get(url, tries=2)
     if not html:
         return d
     try:
-        for s in BeautifulSoup(html, "html.parser").find_all("script", type="application/ld+json"):
-            try:
-                j = json.loads(s.string or "")
-            except Exception:
-                continue
-            for o in (j if isinstance(j, list) else [j]):
-                if isinstance(o, dict) and (o.get("@type") == "Product" or "offers" in o):
-                    im = o.get("image") or []
-                    d["images"] = [x if isinstance(x, str) else x.get("url", "") for x in (im if isinstance(im, list) else [im])][:3]
-        g = lambda rx: (re.search(rx, html) or [None, None])[1]
-        d["rating"] = float(g(r'"feedback_reputation":\s*([0-9.]+)') or 0) or None
-        d["reviews"] = int(g(r'"feedback_count":\s*(\d+)') or 0) or None
-        d["seller_id"] = g(r'"profile_url":"https://www\.vinted\.[a-z.]+/member/(\d+)')
-        d["seller"] = g(r'"login":"([^"]+)"')
-        ts = g(r'"created_at_ts":\s*"?(\d{9,})')
-        d["created"] = int(ts) if ts else None
+        t = unescape(html)
+        d["images"] = extract_photos(html)
+        if not d["images"]:                              # plan C : JSON-LD
+            for sc in BeautifulSoup(html, "html.parser").find_all("script", type="application/ld+json"):
+                try:
+                    j = json.loads(sc.string or "")
+                except Exception:
+                    continue
+                for o in (j if isinstance(j, list) else [j]):
+                    if isinstance(o, dict) and (o.get("@type") == "Product" or "offers" in o):
+                        im = o.get("image") or []
+                        d["images"] = dedupe_photos([x if isinstance(x, str) else x.get("url", "") for x in (im if isinstance(im, list) else [im])], 3)
+        m = re.search(r'"user":\s*\{\s*"id":\s*(\d+),\s*"login":\s*"([^"]+)"', t)
+        if m:
+            d["seller_id"], d["seller"] = m.group(1), m.group(2)
+        else:
+            g = lambda rx: (re.search(rx, t) or [None, None])[1]
+            d["seller_id"] = g(r'"profile_url":\s*"https://www\.vinted\.[a-z.]+/member/(\d+)')
+            d["seller"] = g(r'"login":\s*"([^"]+)"')
+        r = re.search(r'"feedback_reputation":\s*([0-9.]+)', t)
+        n = re.search(r'"feedback_count":\s*(\d+)', t)
+        d["rating"] = float(r.group(1)) if r else None
+        d["reviews"] = int(n.group(1)) if n else None
+        if d["reviews"] is None and d["seller_id"]:
+            d["rating"], d["reviews"] = await seller_stats(d["seller_id"])
+        ts = re.search(r'"created_at_ts":\s*"?(\d{9,})', t)
+        d["created"] = int(ts.group(1)) if ts else None
     except Exception as e:
         print(f"[detail] {e}")
     return d
@@ -166,8 +239,10 @@ async def diag():
 
 # ───────────── Publication Discord ─────────────
 def stars(r, n):
-    if not n or not r:
+    if not n:
         return "Aucun avis"
+    if not r:
+        return f"{n} avis"
     r = r / 100 if r > 5 else r
     k = max(1, min(5, round(r * 5 if r <= 1 else r)))
     return "⭐" * k + "☆" * (5 - k) + f" ({n})"
@@ -185,8 +260,7 @@ async def post_item(channel_id, c, det, label):
     ch = bot.get_channel(int(channel_id)) if channel_id else None
     if not ch:
         return
-    imgs = [x for x in ([c["image"]] if c["image"] else []) + det["images"] if x]
-    imgs = list(dict.fromkeys(imgs))[:3] or []
+    imgs = merge_imgs(c["image"], det["images"])
     e = discord.Embed(title=("🔥 " if c["demand"] else "") + c["title"][:240], url=c["url"], color=COLOR)
     e.add_field(name="💰 Prix", value=(f"**{c['price']:.2f} €**" if c["price"] is not None else "—") + (f"\n{c['total']:.2f} € frais inclus" if c["total"] else ""))
     e.add_field(name="🏷️ Marque", value=c["brand"] or "—"); e.add_field(name="👕 Taille", value=c["size"] or "—")
@@ -251,7 +325,7 @@ async def scan(url, s):
         SEEN[url] = {c["id"] for c in cards}
     for c in reversed(new[:MAX_NEW_PER_SCAN]):
         det = await fetch_detail(c["url"])
-        imgs = list(dict.fromkeys(([c["image"]] if c["image"] else []) + det["images"]))[:3]
+        imgs = merge_imgs(c["image"], det["images"])
         for t in s["targets"]:
             row = {"item_id": int(c["id"]), "title": c["title"][:200], "price": c["price"], "total_price": c["total"], "brand": c["brand"] or None, "size": c["size"] or None,
                    "etat": c["state"] or None, "favoris": c["fav"], "url": c["url"], "images": imgs, "seller_login": det["seller"], "seller_rating": det["rating"], "seller_reviews": det["reviews"]}
